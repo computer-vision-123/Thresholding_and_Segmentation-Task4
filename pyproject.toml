@@ -1,0 +1,22 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "cv_task4"
+version = "0.1.0"
+description = "CV Task 4 – Thresholding & Segmentation (C++ backend, PyQt5 frontend)"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "PyQt5",
+    "opencv-python",
+    "scikit-image",
+    "scikit-learn",
+]
+
+[tool.scikit-build]
+# Place the compiled extension directly in the repo root so that
+# `import cv_backend` works without installing the package.
+wheel.packages = []
+build-dir = "build/{wheel_tag}"

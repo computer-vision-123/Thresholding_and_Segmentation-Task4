@@ -1,132 +1,148 @@
 """
-segmentation.py – Part B processing module.
+segmentation.py – Part B public API (thin Python wrappers).
 
-Public API
-----------
-apply_kmeans(image, k, max_iter)      -> np.ndarray  (label image)
-apply_region_growing(image, seed, tol) -> np.ndarray  (label image)
-apply_agglomerative(image, k)          -> np.ndarray  (label image)
-apply_mean_shift(image, bandwidth)     -> np.ndarray  (label image)
-
-Each function accepts:
-  - image : np.ndarray  – H×W (grayscale) or H×W×3 (color) uint8 array
-and returns a label image (np.ndarray uint8) where each unique value
-identifies a distinct segment.
+Responsibilities of this layer
+-------------------------------
+1. Accept uint8 numpy arrays (gray or color) from the UI.
+2. Normalise to float32 in [0, 1] before calling into cv_backend.
+3. Wrap the returned float32 label image in a SegmentationResult dataclass.
+4. Raise a clear ImportError if cv_backend has not been compiled yet.
 """
 
 from __future__ import annotations
-from typing import Tuple
+from typing import Tuple, Union
+
 import numpy as np
+
+from core.result_types import SegmentationResult
+
+try:
+    import cv_backend
+except ImportError as e:
+    raise ImportError(
+        "cv_backend C++ extension not found. "
+        "Build it first with:  pip install -e ."
+    ) from e
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# K-Means Clustering
+# Internal helper
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _to_float32(image: np.ndarray) -> np.ndarray:
+    """
+    Convert a uint8 image (gray or color) to float32 in [0, 1].
+
+    Accepts shapes:
+      - (H, W)    – grayscale
+      - (H, W, 3) – colour (BGR or RGB, order preserved)
+    """
+    if image.ndim not in (2, 3):
+        raise ValueError(f"Expected 2-D or 3-D image, got shape {image.shape}")
+    return image.astype(np.float32) / 255.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public API
 # ──────────────────────────────────────────────────────────────────────────────
 
 def apply_kmeans(
     image: np.ndarray,
     k: int = 4,
     max_iter: int = 100,
-) -> np.ndarray:
+) -> SegmentationResult:
     """
-    Segment image pixels via K-Means clustering.
+    Segment image using K-Means clustering.
 
     Parameters
     ----------
     image : np.ndarray
-        H×W or H×W×3 uint8 image.
+        uint8 image, shape (H, W) or (H, W, 3).
     k : int
         Number of clusters.
     max_iter : int
-        Maximum number of EM iterations.
+        Maximum EM iterations.
 
     Returns
     -------
-    labels : np.ndarray
-        H×W uint8 label image, values in {0 … k-1}.
+    SegmentationResult
     """
-    raise NotImplementedError
+    f32 = _to_float32(image)
+    labels = cv_backend.segment_kmeans(f32, k, max_iter)
+    return SegmentationResult(image=labels, method="K-Means")
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Region Growing
-# ──────────────────────────────────────────────────────────────────────────────
 
 def apply_region_growing(
     image: np.ndarray,
     seed: Tuple[int, int],
     tolerance: int = 15,
-) -> np.ndarray:
+) -> SegmentationResult:
     """
-    Grow a region from a seed pixel based on intensity similarity.
-
+    Segment image using region growing from a seed pixel.
 
     Parameters
     ----------
     image : np.ndarray
-        H×W uint8 grayscale image.
-    seed : Tuple[int, int]
+        uint8 grayscale image, shape (H, W).
+    seed : tuple[int, int]
         (row, col) seed pixel coordinate.
     tolerance : int
-        Maximum allowed intensity difference from the seed.
+        Max intensity difference from seed (uint8 units).
 
     Returns
     -------
-    labels : np.ndarray
-        H×W uint8 binary mask (255 = region, 0 = background).
+    SegmentationResult
     """
-    raise NotImplementedError
+    if image.ndim != 2:
+        raise ValueError("Region growing requires a grayscale (2-D) image.")
+    f32 = _to_float32(image)
+    labels = cv_backend.segment_region_growing(
+        f32, seed[0], seed[1], tolerance / 255.0
+    )
+    return SegmentationResult(image=labels, method="Region Growing")
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Agglomerative (Hierarchical) Clustering
-# ──────────────────────────────────────────────────────────────────────────────
 
 def apply_agglomerative(
     image: np.ndarray,
     k: int = 4,
-) -> np.ndarray:
+) -> SegmentationResult:
     """
-    Segment image using agglomerative (bottom-up) hierarchical clustering.
-
+    Segment image using agglomerative (hierarchical) clustering.
 
     Parameters
     ----------
     image : np.ndarray
-        H×W or H×W×3 uint8 image.
+        uint8 image, shape (H, W) or (H, W, 3).
     k : int
         Target number of clusters.
 
     Returns
     -------
-    labels : np.ndarray
-        H×W uint8 label image, values in {0 … k-1}.
+    SegmentationResult
     """
-    raise NotImplementedError
+    f32 = _to_float32(image)
+    labels = cv_backend.segment_agglomerative(f32, k)
+    return SegmentationResult(image=labels, method="Agglomerative")
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Mean Shift Clustering
-# ──────────────────────────────────────────────────────────────────────────────
 
 def apply_mean_shift(
     image: np.ndarray,
     bandwidth: float = 30.0,
-) -> np.ndarray:
+) -> SegmentationResult:
     """
-    Segment image using the Mean Shift algorithm.
-
+    Segment image using Mean Shift.
 
     Parameters
     ----------
     image : np.ndarray
-        H×W or H×W×3 uint8 image.
+        uint8 image, shape (H, W) or (H, W, 3).
     bandwidth : float
-        Kernel bandwidth (radius) controlling cluster granularity.
+        Kernel bandwidth in uint8 units (converted to [0,1] internally).
 
     Returns
     -------
-    labels : np.ndarray
-        H×W uint8 label image.
+    SegmentationResult
     """
-    raise NotImplementedError
+    f32 = _to_float32(image)
+    labels = cv_backend.segment_mean_shift(f32, bandwidth / 255.0)
+    return SegmentationResult(image=labels, method="Mean Shift")

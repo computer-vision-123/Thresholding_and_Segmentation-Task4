@@ -1,62 +1,77 @@
 """
-thresholding.py – Part A processing module.
+thresholding.py – Part A public API (thin Python wrappers).
 
-Public API
-----------
-apply_optimal_thresholding(image: np.ndarray) -> Tuple[np.ndarray, int]
-apply_otsu_thresholding(image: np.ndarray) -> Tuple[np.ndarray, int]
-apply_spectral_thresholding(image: np.ndarray, n_classes: int) -> Tuple[np.ndarray, List[int]]
-apply_local_thresholding(image: np.ndarray, block_size: int, offset: int) -> np.ndarray
-
-Each function accepts a 2-D uint8 numpy array (grayscale image) and returns:
-  - binary / multi-level thresholded image (np.ndarray uint8)
-  - the computed threshold value(s) for display
+Responsibilities of this layer
+-------------------------------
+1. Accept uint8 numpy arrays from the UI.
+2. Normalise them to float32 in [0, 1] before calling into cv_backend.
+3. Unpack the C++ py::tuple return value and wrap it in the appropriate
+   result dataclass.
+4. Raise a clear ImportError if cv_backend has not been compiled yet.
 """
 
 from __future__ import annotations
-from typing import Tuple, List
+from typing import Union
+
 import numpy as np
+
+from core.result_types import (
+    OptimalThresholdResult,
+    OtsuThresholdResult,
+    SpectralThresholdResult,
+    LocalThresholdResult,
+)
+
+try:
+    import cv_backend
+except ImportError as e:
+    raise ImportError(
+        "cv_backend C++ extension not found. "
+        "Build it first with:  pip install -e ."
+    ) from e
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Optimal (Iterative) Thresholding
+# Internal helper
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _to_float32(image: np.ndarray) -> np.ndarray:
+    """Convert a uint8 grayscale image to float32 in [0, 1]."""
+    if image.ndim != 2:
+        raise ValueError(f"Expected 2-D grayscale image, got shape {image.shape}")
+    return image.astype(np.float32) / 255.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public API
 # ──────────────────────────────────────────────────────────────────────────────
 
 def apply_optimal_thresholding(
     image: np.ndarray,
     tol: int = 1,
-) -> Tuple[np.ndarray, int]:
+) -> OptimalThresholdResult:
     """
-    Iteratively estimate the optimal global threshold.
-
+    Apply optimal (iterative) thresholding to a grayscale image.
 
     Parameters
     ----------
     image : np.ndarray
         2-D uint8 grayscale image.
     tol : int
-        Convergence tolerance.
+        Convergence tolerance in uint8 units (converted to [0,1] internally).
 
     Returns
     -------
-    binary : np.ndarray
-        Binary image (0 or 255).
-    threshold : int
-        Final computed threshold value.
+    OptimalThresholdResult
     """
-    raise NotImplementedError
+    f32 = _to_float32(image)
+    binary, threshold = cv_backend.threshold_optimal(f32, tol / 255.0)
+    return OptimalThresholdResult(image=binary, threshold=float(threshold))
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Otsu's Method
-# ──────────────────────────────────────────────────────────────────────────────
-
-def apply_otsu_thresholding(
-    image: np.ndarray,
-) -> Tuple[np.ndarray, int]:
+def apply_otsu_thresholding(image: np.ndarray) -> OtsuThresholdResult:
     """
-    Compute the globally optimal threshold by maximising between-class variance.
-
+    Apply Otsu's global thresholding to a grayscale image.
 
     Parameters
     ----------
@@ -65,68 +80,64 @@ def apply_otsu_thresholding(
 
     Returns
     -------
-    binary : np.ndarray
-        Binary image (0 or 255).
-    threshold : int
-        Optimal Otsu threshold value.
+    OtsuThresholdResult
     """
-    raise NotImplementedError
+    f32 = _to_float32(image)
+    binary, threshold = cv_backend.threshold_otsu(f32)
+    return OtsuThresholdResult(image=binary, threshold=float(threshold))
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Spectral (Multi-modal) Thresholding
-# ──────────────────────────────────────────────────────────────────────────────
 
 def apply_spectral_thresholding(
     image: np.ndarray,
     n_classes: int = 3,
-) -> Tuple[np.ndarray, List[int]]:
+) -> SpectralThresholdResult:
     """
-    Extend Otsu's criterion to n_classes > 2 (multi-threshold / spectral).
-
+    Apply spectral (multi-Otsu) thresholding to a grayscale image.
 
     Parameters
     ----------
     image : np.ndarray
         2-D uint8 grayscale image.
     n_classes : int
-        Number of output intensity classes (>= 3 for multi-modal).
+        Number of output classes (≥ 3).
 
     Returns
     -------
-    labelled : np.ndarray
-        Label image with values in {0 … n_classes-1}, scaled to uint8.
-    thresholds : List[int]
-        List of (n_classes − 1) threshold values.
+    SpectralThresholdResult
     """
-    raise NotImplementedError
+    if n_classes < 3:
+        raise ValueError("spectral thresholding requires n_classes >= 3")
+    f32 = _to_float32(image)
+    label_image, thresholds = cv_backend.threshold_spectral(f32, n_classes)
+    return SpectralThresholdResult(
+        image=label_image,
+        thresholds=[float(t) for t in thresholds],
+    )
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Local (Adaptive) Thresholding
-# ──────────────────────────────────────────────────────────────────────────────
 
 def apply_local_thresholding(
     image: np.ndarray,
     block_size: int = 35,
     offset: int = 10,
-) -> np.ndarray:
+) -> LocalThresholdResult:
     """
-    Compute a per-pixel threshold from the local neighbourhood mean.
-
+    Apply local (adaptive) thresholding to a grayscale image.
 
     Parameters
     ----------
     image : np.ndarray
         2-D uint8 grayscale image.
     block_size : int
-        Odd integer; size of the local neighbourhood window.
+        Odd window size.
     offset : int
-        Constant subtracted from the local mean.
+        Offset (in uint8 units) subtracted from the local mean.
 
     Returns
     -------
-    binary : np.ndarray
-        Binary image (0 or 255).
+    LocalThresholdResult
     """
-    raise NotImplementedError
+    if block_size % 2 == 0:
+        raise ValueError("block_size must be odd")
+    f32 = _to_float32(image)
+    binary = cv_backend.threshold_local(f32, block_size, offset / 255.0)
+    return LocalThresholdResult(image=binary)

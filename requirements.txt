@@ -1,5 +1,10 @@
+# Runtime dependencies
 PyQt5
 numpy
 opencv-python
 scikit-image
 scikit-learn
+
+# Build dependencies (also declared in pyproject.toml)
+scikit-build-core>=0.9
+pybind11>=2.12
