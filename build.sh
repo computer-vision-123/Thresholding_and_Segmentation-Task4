@@ -85,11 +85,17 @@ build_cpp() {
         -e "${SCRIPT_DIR}"
 
     # Verify the extension was produced
-    SO_FILE=$(find "${SCRIPT_DIR}" -maxdepth 1 -name "cv_backend*.so" | head -n1)
+    SO_FILE=$(find "${SCRIPT_DIR}" -maxdepth 4 -name "cv_backend*.so" | head -n1)
     if [[ -n "${SO_FILE}" ]]; then
-        success "Extension built: $(basename "${SO_FILE}")"
+        # If it's not in the root, copy it there for easier import
+        if [[ "$(dirname "${SO_FILE}")" != "${SCRIPT_DIR}" ]]; then
+            cp "${SO_FILE}" "${SCRIPT_DIR}/"
+            success "Extension built and copied to root: $(basename "${SO_FILE}")"
+        else
+            success "Extension built: $(basename "${SO_FILE}")"
+        fi
     else
-        warn "cv_backend .so not found in project root – check build logs."
+        warn "cv_backend .so not found – check build logs."
     fi
 }
 
