@@ -449,17 +449,17 @@ ImageF32 mean_shift(ImageF32 image, float bandwidth)
     const int C = (info.ndim == 3) ? static_cast<int>(info.shape[2]) : 1;
     const float* src = static_cast<const float*>(info.ptr);
  
-    // ── 1. Downsample to super-pixel grid ────────────────────────────────────
-    const int max_points = 500;
-    int cell = std::max(1, static_cast<int>(std::floor(
-        std::sqrt(static_cast<double>(H * W) / max_points)
-    )));
+    // ── 1. Build super-pixel grid ─────────────────────────────────────────────
+    const int MAX_POINTS = 1200;
+    const int cell = std::max(1, static_cast<int>(
+        std::floor(std::sqrt(static_cast<double>(H * W) / MAX_POINTS))
+    ));
  
     const int grid_h = (H + cell - 1) / cell;
     const int grid_w = (W + cell - 1) / cell;
     const int N      = grid_h * grid_w;
  
-    // features[i * C + c] = mean of channel c for super-pixel i
+    // features[i*C + c] = mean of channel c for super-pixel i
     std::vector<float> features(static_cast<size_t>(N) * C, 0.0f);
     std::vector<int>   pix_count(N, 0);
  
@@ -485,20 +485,18 @@ ImageF32 mean_shift(ImageF32 image, float bandwidth)
     }
  
     // ── 2. Mean-shift iteration for every super-pixel ────────────────────────
-    const float bw_sq   = bandwidth * bandwidth;   // compare squared distances
-    const float epsilon  = 1e-5f;                  // convergence tolerance
-    const int   max_iter = 100;
+    const float bw_sq  = bandwidth * bandwidth;
+    const float epsilon = 1e-5f;
+    const int max_iter  = 100;
  
     std::vector<float> modes(static_cast<size_t>(N) * C);
- 
-    // Temporary buffer for the new centre computed each iteration
-    std::vector<float> new_centre(C);
+    std::vector<float> centre(C);
  
     for (int i = 0; i < N; ++i) {
  
-        // Initialise the moving centre at this point's feature vector
+        // Initialise the moving centre at this super-pixel's feature vector
         for (int ch = 0; ch < C; ++ch)
-            new_centre[ch] = features[static_cast<size_t>(i) * C + ch];
+            centre[ch] = features[static_cast<size_t>(i) * C + ch];
  
         for (int iter = 0; iter < max_iter; ++iter) {
  
@@ -510,10 +508,9 @@ ImageF32 mean_shift(ImageF32 image, float bandwidth)
                 float dist_sq = 0.0f;
                 for (int ch = 0; ch < C; ++ch) {
                     float diff = features[static_cast<size_t>(j) * C + ch]
-                                 - new_centre[ch];
+                                 - centre[ch];
                     dist_sq += diff * diff;
                 }
- 
                 if (dist_sq <= bw_sq) {
                     for (int ch = 0; ch < C; ++ch)
                         sum[ch] += features[static_cast<size_t>(j) * C + ch];
@@ -521,27 +518,27 @@ ImageF32 mean_shift(ImageF32 image, float bandwidth)
                 }
             }
  
-            // Compute shift magnitude before updating the centre
+            // Shift centre to the mean; check convergence
             float shift_sq = 0.0f;
             for (int ch = 0; ch < C; ++ch) {
                 float next = (count > 0)
                              ? static_cast<float>(sum[ch] / count)
-                             : new_centre[ch];
-                float diff = next - new_centre[ch];
+                             : centre[ch];
+                float diff = next - centre[ch];
                 shift_sq  += diff * diff;
-                new_centre[ch] = next;
+                centre[ch] = next;
             }
  
             if (shift_sq < epsilon * epsilon)
                 break;
         }
  
-        // Store converged centre as the mode for super-pixel i
+        // Store converged centre as the mode for this super-pixel
         for (int ch = 0; ch < C; ++ch)
-            modes[static_cast<size_t>(i) * C + ch] = new_centre[ch];
+            modes[static_cast<size_t>(i) * C + ch] = centre[ch];
     }
  
-    // ── 3. Merge nearby modes into cluster labels ─────────────────────────────
+    // ── 3. Merge nearby modes (union-find) ────────────────────────────────────
     std::vector<int> parent(N);
     std::iota(parent.begin(), parent.end(), 0);
  
@@ -569,7 +566,7 @@ ImageF32 mean_shift(ImageF32 image, float bandwidth)
         }
     }
  
-    // ── 4. Relabel roots to consecutive ids 0, 1, … ──────────────────────────
+    // ── 4. Relabel roots to consecutive 0, 1, … ──────────────────────────────
     std::unordered_map<int, int> label_map;
     int next_label = 0;
  
@@ -581,7 +578,7 @@ ImageF32 mean_shift(ImageF32 image, float bandwidth)
         cell_label[i] = label_map[root];
     }
  
-    // ── 5. Project cell labels back to every original pixel ──────────────────
+    // ── 5. Back-project cell labels to every original pixel ──────────────────
     ImageF32 label_img(std::vector<ssize_t>{H, W});
     auto out = label_img.mutable_unchecked<2>();
  
@@ -592,7 +589,6 @@ ImageF32 mean_shift(ImageF32 image, float bandwidth)
             const int r_end   = std::min(r_start + cell, H);
             const int c_start = gc * cell;
             const int c_end   = std::min(c_start + cell, W);
- 
             for (int r = r_start; r < r_end; ++r)
                 for (int c = c_start; c < c_end; ++c)
                     out(r, c) = lbl;
