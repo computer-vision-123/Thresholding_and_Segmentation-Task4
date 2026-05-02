@@ -1,14 +1,3 @@
-/**
- * segmentation.cpp – Part B algorithm stubs.
- *
- * Each function currently raises std::runtime_error("Not implemented").
- * Replace the throw with the actual algorithm body during implementation.
- *
- * Input contract (enforced by the Python wrapper in core/segmentation.py):
- *   - Grayscale images: 2-D float32 C-contiguous array, values in [0, 1].
- *   - Colour images:    3-D float32 C-contiguous array (H, W, 3), values in [0, 1].
- */
-
 #include "segmentation.hpp"
 
 #include <stdexcept>
@@ -16,33 +5,163 @@
 #include <cmath>
 #include <limits>
 #include <queue>
+#include <random>
+#include <algorithm>
+#include <numeric>
 
 namespace segmentation {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// K-Means Clustering
-// ─────────────────────────────────────────────────────────────────────────────
+static float squared_distance(const float* a, const float* b, int C)
+{
+    float dist = 0.0f;
+    for (int c = 0; c < C; ++c) {
+        float diff = a[c] - b[c];
+        dist += diff * diff;
+    }
+    return dist;
+}
+
+
+static std::vector<float> flatten_image(const py::buffer_info& info,
+                                        int& N, int& C)
+{
+    const int H = static_cast<int>(info.shape[0]);
+    const int W = static_cast<int>(info.shape[1]);
+    C = (info.ndim == 3) ? static_cast<int>(info.shape[2]) : 1;
+    N = H * W;
+ 
+    const float* src = static_cast<const float*>(info.ptr);
+    std::vector<float> features(static_cast<size_t>(N) * C);
+ 
+    if (C == 1) {
+        // Grayscale: direct copy (already contiguous)
+        std::copy(src, src + N, features.begin());
+    } else {
+        // Colour: src is already HxWx3 C-contiguous → layout matches target
+        std::copy(src, src + N * C, features.begin());
+    }
+ 
+    return features;
+}
 
 ImageF32 kmeans(ImageF32 image, int k, int max_iter)
 {
-    if (k < 2)
+     if (k < 2)
         throw std::invalid_argument("k must be >= 2");
+ 
+    // ── 1. Flatten image to feature matrix (N x C) 
+    py::buffer_info info = image.request();
+    int N, C;
+    std::vector<float> features = flatten_image(info, N, C);
+ 
+    const int H = static_cast<int>(info.shape[0]);
+    const int W = static_cast<int>(info.shape[1]);
+ 
+    if (N < k)
+        throw std::invalid_argument("k must be <= number of pixels");
+ 
+    // ── 2. K-Means++ initialisation ───────────────────────────────────────────
+ 
+    std::mt19937 rng(42); // fixed seed → reproducible results
+ 
+    // centroids[j] = feature vector of centroid j, length C
+    std::vector<std::vector<float>> centroids(k, std::vector<float>(C, 0.0f));
+ 
+    // Pick first centroid uniformly at random
+    {
+        std::uniform_int_distribution<int> uni(0, N - 1);
+        int first_idx = uni(rng);
+        for (int c = 0; c < C; ++c)
+            centroids[0][c] = features[static_cast<size_t>(first_idx) * C + c];
+    }
+ 
+    // Squared-distance buffer (one entry per pixel)
+    std::vector<float> min_dist_sq(N, std::numeric_limits<float>::max());
+ 
+    for (int j = 1; j < k; ++j) {
+        // Update min_dist_sq using the centroid added in the previous iteration
+        const float* prev = centroids[j - 1].data();
+        for (int i = 0; i < N; ++i) {
+            float d = squared_distance(&features[static_cast<size_t>(i) * C], prev, C);
+            if (d < min_dist_sq[i])
+                min_dist_sq[i] = d;
+        }
+ 
+        // Sample next centroid proportional to min_dist_sq
+        std::discrete_distribution<int> weighted(min_dist_sq.begin(),
+                                                  min_dist_sq.end());
+        int next_idx = weighted(rng);
+        for (int c = 0; c < C; ++c)
+            centroids[j][c] = features[static_cast<size_t>(next_idx) * C + c];
+    }
+ 
+    // ── 3. EM loop ────────────────────────────────────────────────────────────
+    std::vector<int> labels(N, 0);
+ 
+    for (int iter = 0; iter < max_iter; ++iter) {
 
-    // TODO: implement K-Means
-    //
-    // Suggested implementation sketch:
-    //   1. Flatten image to shape (N, C): N=H*W, C=1 or C=3.
-    //   2. k-means++ initialisation:
-    //        - Pick first centroid randomly.
-    //        - For each subsequent centroid: sample proportional to squared
-    //          distance from nearest existing centroid.
-    //   3. EM loop (up to max_iter):
-    //        a. Assignment: labels[i] = argmin_j dist(pixel[i], centroid[j])
-    //        b. Update: centroid[j] = mean of all pixels with label j
-    //        c. Break early if no label changed.
-    //   4. Reshape labels to (H, W) and return as float32.
-
-    throw std::runtime_error("segmentation::kmeans – Not implemented");
+        bool any_changed = false;
+ 
+        for (int i = 0; i < N; ++i) {
+            float  best_dist  = std::numeric_limits<float>::max();
+            int    best_label = 0;
+ 
+            for (int j = 0; j < k; ++j) {
+                float d = squared_distance(
+                    &features[static_cast<size_t>(i) * C],
+                    centroids[j].data(),
+                    C
+                );
+                if (d < best_dist) {
+                    best_dist  = d;
+                    best_label = j;
+                }
+            }
+ 
+            if (best_label != labels[i]) {
+                labels[i] = best_label;
+                any_changed = true;
+            }
+        }
+ 
+        // ── 3b. Early stopping ────────────────────────────────────────────────
+        if (!any_changed)
+            break;
+ 
+        // ── 3c. Update step ───────────────────────────────────────────────────
+        std::vector<std::vector<double>> sums(k, std::vector<double>(C, 0.0));
+        std::vector<int>                 counts(k, 0);
+ 
+        for (int i = 0; i < N; ++i) {
+            int j = labels[i];
+            counts[j]++;
+            for (int c = 0; c < C; ++c)
+                sums[j][c] += features[static_cast<size_t>(i) * C + c];
+        }
+ 
+        std::uniform_int_distribution<int> uni(0, N - 1);
+        for (int j = 0; j < k; ++j) {
+            if (counts[j] > 0) {
+                for (int c = 0; c < C; ++c)
+                    centroids[j][c] = static_cast<float>(sums[j][c] / counts[j]);
+            } else {
+                // Reinitialise empty cluster to a random pixel
+                int rand_idx = uni(rng);
+                for (int c = 0; c < C; ++c)
+                    centroids[j][c] = features[static_cast<size_t>(rand_idx) * C + c];
+            }
+        }
+    }
+ 
+    // ── 4. Build output label image (H x W), float32 ─────────────────────────
+    ImageF32 label_img(std::vector<ssize_t>{H, W});
+    auto out = label_img.mutable_unchecked<2>();
+ 
+    for (int r = 0; r < H; ++r)
+        for (int w = 0; w < W; ++w)
+            out(r, w) = static_cast<float>(labels[r * W + w]);
+ 
+    return label_img;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
