@@ -1,23 +1,5 @@
 /**
  * bindings.cpp – PyBind11 module definition for cv_backend.
- *
- * Exposes all thresholding and segmentation C++ functions to Python.
- *
- * Python-side usage (after `pip install -e .`):
- *
- *   import cv_backend
- *
- *   # Thresholding (returns py::tuple – consumed by core/thresholding.py)
- *   img_bin, thresh = cv_backend.threshold_optimal(float32_image, tol=1/255)
- *   img_bin, thresh = cv_backend.threshold_otsu(float32_image)
- *   img_lab, threshs = cv_backend.threshold_spectral(float32_image, n_classes=3)
- *   img_bin         = cv_backend.threshold_local(float32_image, block_size=35, offset=10/255)
- *
- *   # Segmentation (returns float32 label image)
- *   labels = cv_backend.segment_kmeans(float32_image, k=4, max_iter=100)
- *   labels = cv_backend.segment_region_growing(float32_image, seed_row, seed_col, tol)
- *   labels = cv_backend.segment_agglomerative(float32_image, k=4)
- *   labels = cv_backend.segment_mean_shift(float32_image, bandwidth=30/255)
  */
 
 #include <pybind11/pybind11.h>
@@ -154,27 +136,28 @@ np.ndarray
         "segment_region_growing",
         &segmentation::region_growing,
         py::arg("image"),
-        py::arg("seed_row"),
-        py::arg("seed_col"),
+        py::arg("seed_rows"),
+        py::arg("seed_cols"),
         py::arg("tolerance") = 15.0f / 255.0f,
         R"doc(
-Region growing segmentation from a seed pixel.
+Multi-seed region growing segmentation.
 
 Parameters
 ----------
 image : np.ndarray
     Float32 grayscale image, shape (H, W), values in [0, 1].
-seed_row : int
-    Row index of the seed pixel.
-seed_col : int
-    Column index of the seed pixel.
+seed_rows : list[int]
+    Row indices of seed pixels.
+seed_cols : list[int]
+    Column indices of seed pixels.
 tolerance : float, optional
-    Max intensity difference from seed (default 15/255).
+    Max intensity difference from each seed's value (default 15/255).
 
 Returns
 -------
 np.ndarray
-    Float32 binary mask, shape (H, W).  1.0 = region, 0.0 = background.
+    Float32 label image, shape (H, W).
+    0 = background, 1..N = region for seed N.
         )doc"
     );
 

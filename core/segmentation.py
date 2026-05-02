@@ -10,7 +10,7 @@ Responsibilities of this layer
 """
 
 from __future__ import annotations
-from typing import Tuple, Union
+from typing import List, Tuple, Union
 
 import numpy as np
 
@@ -74,30 +74,41 @@ def apply_kmeans(
 
 def apply_region_growing(
     image: np.ndarray,
-    seed: Tuple[int, int],
+    seeds: List[Tuple[int, int]],
     tolerance: int = 15,
 ) -> SegmentationResult:
     """
-    Segment image using region growing from a seed pixel.
+    Segment image using multi-seed region growing (parallel BFS).
 
     Parameters
     ----------
     image : np.ndarray
         uint8 grayscale image, shape (H, W).
-    seed : tuple[int, int]
-        (row, col) seed pixel coordinate.
+    seeds : list of (row, col) tuples
+        One or more seed pixel coordinates. Each seed spawns its own region;
+        the region label matches the 1-based seed index (seed 0 → label 1, etc.).
     tolerance : int
-        Max intensity difference from seed (uint8 units).
+        Max intensity difference from each seed's value (uint8 units, 0–255).
 
     Returns
     -------
     SegmentationResult
+        label image: 0 = background, 1..N = region for seed N.
     """
     if image.ndim != 2:
         raise ValueError("Region growing requires a grayscale (2-D) image.")
+    if not seeds:
+        raise ValueError("At least one seed must be provided.")
+
     f32 = _to_float32(image)
+    seed_rows = [int(s[0]) for s in seeds]
+    seed_cols = [int(s[1]) for s in seeds]
+
     labels = cv_backend.segment_region_growing(
-        f32, seed[0], seed[1], tolerance / 255.0
+        f32,
+        seed_rows,
+        seed_cols,
+        tolerance / 255.0,
     )
     return SegmentationResult(image=labels, method="Region Growing")
 

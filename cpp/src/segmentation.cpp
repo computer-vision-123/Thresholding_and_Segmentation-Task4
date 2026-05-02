@@ -168,38 +168,82 @@ ImageF32 kmeans(ImageF32 image, int k, int max_iter)
 // Region Growing
 // ─────────────────────────────────────────────────────────────────────────────
 
-ImageF32 region_growing(ImageF32 image, int seed_row, int seed_col, float tolerance)
+ImageF32 region_growing(ImageF32 image,
+                        std::vector<int> seed_rows,
+                        std::vector<int> seed_cols,
+                        float tolerance)
 {
-    // TODO: implement BFS region growing
-    //
-    // Suggested implementation sketch:
-    //   auto buf = image.unchecked<2>();
-    //   ssize_t H = buf.shape(0), W = buf.shape(1);
-    //   py::array_t<float> result({H, W});   // zero-initialised
-    //   std::vector<std::vector<bool>> visited(H, std::vector<bool>(W, false));
-    //   float seed_val = buf(seed_row, seed_col);
-    //
-    //   std::queue<std::pair<int,int>> q;
-    //   q.push({seed_row, seed_col});
-    //   visited[seed_row][seed_col] = true;
-    //
-    //   const int dr[] = {-1, 1, 0, 0};
-    //   const int dc[] = { 0, 0,-1, 1};
-    //   while (!q.empty()) {
-    //       auto [r, c] = q.front(); q.pop();
-    //       result.mutable_at(r, c) = 1.0f;
-    //       for (int d = 0; d < 4; ++d) {
-    //           int nr = r+dr[d], nc = c+dc[d];
-    //           if (nr>=0 && nr<H && nc>=0 && nc<W && !visited[nr][nc]
-    //               && std::abs(buf(nr,nc) - seed_val) <= tolerance) {
-    //               visited[nr][nc] = true;
-    //               q.push({nr, nc});
-    //           }
-    //       }
-    //   }
-    //   return result;
-
-    throw std::runtime_error("segmentation::region_growing – Not implemented");
+    if (seed_rows.empty() || seed_rows.size() != seed_cols.size())
+        throw std::invalid_argument("seed_rows and seed_cols must be non-empty and equal length");
+ 
+    auto buf = image.unchecked<2>();
+    ssize_t H = buf.shape(0);
+    ssize_t W = buf.shape(1);
+ 
+    // Validate seeds
+    int num_seeds = static_cast<int>(seed_rows.size());
+    for (int s = 0; s < num_seeds; ++s) {
+        if (seed_rows[s] < 0 || seed_rows[s] >= H ||
+            seed_cols[s] < 0 || seed_cols[s] >= W)
+            throw std::invalid_argument("Seed pixel out of image bounds");
+    }
+ 
+    // Label image: -1 = unvisited, 0 = background (unreachable), 1..N = seed labels
+    // We store label as float starting from 1 for seed 0, 2 for seed 1, etc.
+    std::vector<int> label_map(H * W, -1);
+ 
+    // BFS queue holds (row, col, seed_index)
+    std::queue<std::tuple<int,int,int>> q;
+ 
+    // Seed values for each seed
+    std::vector<float> seed_vals(num_seeds);
+ 
+    for (int s = 0; s < num_seeds; ++s) {
+        int r = seed_rows[s];
+        int c = seed_cols[s];
+        seed_vals[s] = buf(r, c);
+ 
+        // Only enqueue if not already claimed by an earlier seed
+        if (label_map[r * W + c] == -1) {
+            label_map[r * W + c] = s + 1;  // labels start at 1
+            q.push({r, c, s});
+        }
+    }
+ 
+    const int dr[] = {-1, 1, 0, 0};
+    const int dc[] = { 0, 0,-1, 1};
+ 
+    while (!q.empty()) {
+        auto [r, c, s] = q.front();
+        q.pop();
+ 
+        for (int d = 0; d < 4; ++d) {
+            int nr = r + dr[d];
+            int nc = c + dc[d];
+ 
+            if (nr < 0 || nr >= H || nc < 0 || nc >= W)
+                continue;
+            if (label_map[nr * W + nc] != -1)
+                continue;
+            if (std::abs(buf(nr, nc) - seed_vals[s]) <= tolerance) {
+                label_map[nr * W + nc] = s + 1;
+                q.push({nr, nc, s});
+            }
+        }
+    }
+ 
+    // Build output: unvisited pixels get label 0 (background)
+    ImageF32 result(std::vector<ssize_t>{H, W});
+    auto out = result.mutable_unchecked<2>();
+ 
+    for (ssize_t r = 0; r < H; ++r) {
+        for (ssize_t c = 0; c < W; ++c) {
+            int lbl = label_map[r * W + c];
+            out(r, c) = static_cast<float>(lbl < 0 ? 0 : lbl);
+        }
+    }
+ 
+    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
