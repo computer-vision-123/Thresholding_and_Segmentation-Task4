@@ -441,24 +441,165 @@ ImageF32 mean_shift(ImageF32 image, float bandwidth)
 {
     if (bandwidth <= 0.0f)
         throw std::invalid_argument("bandwidth must be > 0");
-
-    // TODO: implement Mean Shift
-    //
-    // Suggested implementation sketch:
-    //   1. Flatten image to (N, C) feature matrix.
-    //   2. For each pixel i, start a window centred at feature[i]:
-    //        while (shift_magnitude > epsilon):
-    //            neighbours = all points within bandwidth of current centre
-    //            new_centre  = mean(neighbours)
-    //            shift       = new_centre - current_centre
-    //            current_centre = new_centre
-    //   3. Converged centres that are within bandwidth of each other → same label.
-    //   4. Assign each pixel the label of its converged centre.
-    //
-    // Optimisation: use a spatial index (grid or k-d tree) to speed up
-    // neighbour lookups from O(N) to O(log N) per iteration.
-
-    throw std::runtime_error("segmentation::mean_shift – Not implemented");
+ 
+    // ── 0. Unpack image ───────────────────────────────────────────────────────
+    py::buffer_info info = image.request();
+    const int H = static_cast<int>(info.shape[0]);
+    const int W = static_cast<int>(info.shape[1]);
+    const int C = (info.ndim == 3) ? static_cast<int>(info.shape[2]) : 1;
+    const float* src = static_cast<const float*>(info.ptr);
+ 
+    // ── 1. Downsample to super-pixel grid ────────────────────────────────────
+    const int max_points = 500;
+    int cell = std::max(1, static_cast<int>(std::floor(
+        std::sqrt(static_cast<double>(H * W) / max_points)
+    )));
+ 
+    const int grid_h = (H + cell - 1) / cell;
+    const int grid_w = (W + cell - 1) / cell;
+    const int N      = grid_h * grid_w;
+ 
+    // features[i * C + c] = mean of channel c for super-pixel i
+    std::vector<float> features(static_cast<size_t>(N) * C, 0.0f);
+    std::vector<int>   pix_count(N, 0);
+ 
+    for (int gr = 0; gr < grid_h; ++gr) {
+        for (int gc = 0; gc < grid_w; ++gc) {
+            const int id      = gr * grid_w + gc;
+            const int r_start = gr * cell;
+            const int r_end   = std::min(r_start + cell, H);
+            const int c_start = gc * cell;
+            const int c_end   = std::min(c_start + cell, W);
+ 
+            for (int r = r_start; r < r_end; ++r)
+                for (int c = c_start; c < c_end; ++c)
+                    for (int ch = 0; ch < C; ++ch)
+                        features[static_cast<size_t>(id) * C + ch]
+                            += src[(r * W + c) * C + ch];
+ 
+            pix_count[id] = (r_end - r_start) * (c_end - c_start);
+            for (int ch = 0; ch < C; ++ch)
+                features[static_cast<size_t>(id) * C + ch]
+                    /= static_cast<float>(pix_count[id]);
+        }
+    }
+ 
+    // ── 2. Mean-shift iteration for every super-pixel ────────────────────────
+    const float bw_sq   = bandwidth * bandwidth;   // compare squared distances
+    const float epsilon  = 1e-5f;                  // convergence tolerance
+    const int   max_iter = 100;
+ 
+    std::vector<float> modes(static_cast<size_t>(N) * C);
+ 
+    // Temporary buffer for the new centre computed each iteration
+    std::vector<float> new_centre(C);
+ 
+    for (int i = 0; i < N; ++i) {
+ 
+        // Initialise the moving centre at this point's feature vector
+        for (int ch = 0; ch < C; ++ch)
+            new_centre[ch] = features[static_cast<size_t>(i) * C + ch];
+ 
+        for (int iter = 0; iter < max_iter; ++iter) {
+ 
+            // Accumulate the mean of all points within bandwidth
+            std::vector<double> sum(C, 0.0);
+            int count = 0;
+ 
+            for (int j = 0; j < N; ++j) {
+                float dist_sq = 0.0f;
+                for (int ch = 0; ch < C; ++ch) {
+                    float diff = features[static_cast<size_t>(j) * C + ch]
+                                 - new_centre[ch];
+                    dist_sq += diff * diff;
+                }
+ 
+                if (dist_sq <= bw_sq) {
+                    for (int ch = 0; ch < C; ++ch)
+                        sum[ch] += features[static_cast<size_t>(j) * C + ch];
+                    ++count;
+                }
+            }
+ 
+            // Compute shift magnitude before updating the centre
+            float shift_sq = 0.0f;
+            for (int ch = 0; ch < C; ++ch) {
+                float next = (count > 0)
+                             ? static_cast<float>(sum[ch] / count)
+                             : new_centre[ch];
+                float diff = next - new_centre[ch];
+                shift_sq  += diff * diff;
+                new_centre[ch] = next;
+            }
+ 
+            if (shift_sq < epsilon * epsilon)
+                break;
+        }
+ 
+        // Store converged centre as the mode for super-pixel i
+        for (int ch = 0; ch < C; ++ch)
+            modes[static_cast<size_t>(i) * C + ch] = new_centre[ch];
+    }
+ 
+    // ── 3. Merge nearby modes into cluster labels ─────────────────────────────
+    std::vector<int> parent(N);
+    std::iota(parent.begin(), parent.end(), 0);
+ 
+    std::function<int(int)> find = [&](int x) -> int {
+        if (parent[x] != x)
+            parent[x] = find(parent[x]);   // path compression
+        return parent[x];
+    };
+ 
+    auto unite = [&](int a, int b) {
+        a = find(a); b = find(b);
+        if (a != b) parent[b] = a;
+    };
+ 
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 1; j < N; ++j) {
+            float dist_sq = 0.0f;
+            for (int ch = 0; ch < C; ++ch) {
+                float diff = modes[static_cast<size_t>(i) * C + ch]
+                             - modes[static_cast<size_t>(j) * C + ch];
+                dist_sq += diff * diff;
+            }
+            if (dist_sq <= bw_sq)
+                unite(i, j);
+        }
+    }
+ 
+    // ── 4. Relabel roots to consecutive ids 0, 1, … ──────────────────────────
+    std::unordered_map<int, int> label_map;
+    int next_label = 0;
+ 
+    std::vector<int> cell_label(N);
+    for (int i = 0; i < N; ++i) {
+        int root = find(i);
+        if (label_map.find(root) == label_map.end())
+            label_map[root] = next_label++;
+        cell_label[i] = label_map[root];
+    }
+ 
+    // ── 5. Project cell labels back to every original pixel ──────────────────
+    ImageF32 label_img(std::vector<ssize_t>{H, W});
+    auto out = label_img.mutable_unchecked<2>();
+ 
+    for (int gr = 0; gr < grid_h; ++gr) {
+        for (int gc = 0; gc < grid_w; ++gc) {
+            const float lbl   = static_cast<float>(cell_label[gr * grid_w + gc]);
+            const int r_start = gr * cell;
+            const int r_end   = std::min(r_start + cell, H);
+            const int c_start = gc * cell;
+            const int c_end   = std::min(c_start + cell, W);
+ 
+            for (int r = r_start; r < r_end; ++r)
+                for (int c = c_start; c < c_end; ++c)
+                    out(r, c) = lbl;
+        }
+    }
+ 
+    return label_img;
 }
 
 }  // namespace segmentation
