@@ -254,21 +254,183 @@ ImageF32 agglomerative(ImageF32 image, int k)
 {
     if (k < 2)
         throw std::invalid_argument("k must be >= 2");
-
-    // TODO: implement agglomerative clustering
-    //
-    // Suggested implementation sketch (with superpixel pre-pass):
-    //   1. (Optional) Run SLIC superpixel segmentation to reduce N from H*W to
-    //      ~200-500 superpixels. Each superpixel is represented by its mean
-    //      feature vector.
-    //   2. Build a complete distance matrix (Ward linkage).
-    //   3. Greedily merge the closest pair of clusters until k remain.
-    //   4. Map each pixel to its final cluster label.
-    //
-    // For small images or if SLIC is skipped, work directly on pixels but be
-    // aware of O(N²) memory cost.
-
-    throw std::runtime_error("segmentation::agglomerative – Not implemented");
+ 
+    // ── 0. Unpack image dimensions ────────────────────────────────────────────
+    py::buffer_info info = image.request();
+    const int H = static_cast<int>(info.shape[0]);
+    const int W = static_cast<int>(info.shape[1]);
+    const int C = (info.ndim == 3) ? static_cast<int>(info.shape[2]) : 1;
+    const float* src = static_cast<const float*>(info.ptr);
+ 
+    // ── 1. Choose cell size so the grid has at most ~600 cells total ──────────
+    const int max_cells = 600;
+    int cell = std::max(1, static_cast<int>(std::floor(
+        std::sqrt(static_cast<double>(H * W) / max_cells)
+    )));
+ 
+    const int grid_h = (H + cell - 1) / cell;   // number of cell rows
+    const int grid_w = (W + cell - 1) / cell;   // number of cell cols
+    const int N      = grid_h * grid_w;          // total super-pixels
+ 
+    if (N < k)
+        throw std::invalid_argument(
+            "k is larger than the number of super-pixels; "
+            "use a smaller k or a larger image."
+        );
+ 
+    // ── 2. Compute mean feature vector for each cell ──────────────────────────
+    std::vector<double> means(static_cast<size_t>(N) * C, 0.0);
+    std::vector<int>    sizes(N, 0);
+ 
+    for (int gr = 0; gr < grid_h; ++gr) {
+        for (int gc = 0; gc < grid_w; ++gc) {
+            const int cell_id = gr * grid_w + gc;
+ 
+            // Pixel rows/cols covered by this cell (clamp to image bounds)
+            const int r_start = gr * cell;
+            const int r_end   = std::min(r_start + cell, H);
+            const int c_start = gc * cell;
+            const int c_end   = std::min(c_start + cell, W);
+ 
+            for (int r = r_start; r < r_end; ++r) {
+                for (int c = c_start; c < c_end; ++c) {
+                    for (int ch = 0; ch < C; ++ch) {
+                        // src layout: (r, c, ch) in C-contiguous order
+                        means[static_cast<size_t>(cell_id) * C + ch]
+                            += src[(r * W + c) * C + ch];
+                    }
+                    sizes[cell_id]++;
+                }
+            }
+ 
+            // Normalise to get the actual mean
+            for (int ch = 0; ch < C; ++ch)
+                means[static_cast<size_t>(cell_id) * C + ch]
+                    /= static_cast<double>(sizes[cell_id]);
+        }
+    }
+ 
+    // ── 3. Build the upper-triangle distance matrix ───────────────────────────
+    std::vector<float> D(static_cast<size_t>(N) * N,
+                          std::numeric_limits<float>::max());
+ 
+    for (int i = 0; i < N; ++i) {
+        D[static_cast<size_t>(i) * N + i] = std::numeric_limits<float>::max(); // diagonal = ∞
+ 
+        for (int j = i + 1; j < N; ++j) {
+            float dist = 0.0f;
+            for (int ch = 0; ch < C; ++ch) {
+                float diff = static_cast<float>(
+                    means[static_cast<size_t>(i) * C + ch] -
+                    means[static_cast<size_t>(j) * C + ch]
+                );
+                dist += diff * diff;
+            }
+            D[static_cast<size_t>(i) * N + j] = dist;
+            D[static_cast<size_t>(j) * N + i] = dist; // keep symmetric
+        }
+    }
+ 
+    // ── 4. Agglomerative merging (average linkage) ────────────────────────────
+    std::vector<int>  cluster_id(N);
+    std::iota(cluster_id.begin(), cluster_id.end(), 0); // cluster_id[i] = i initially
+ 
+    std::vector<bool> active(N, true);
+    std::vector<int>  cluster_size(sizes.begin(), sizes.end()); // pixel counts per cluster
+    int n_active = N;
+ 
+    while (n_active > k) {
+ 
+        // 4a. Find the closest pair of active clusters  (brute-force O(N²))
+        float best_dist = std::numeric_limits<float>::max();
+        int   best_i = -1, best_j = -1;
+ 
+        for (int i = 0; i < N; ++i) {
+            if (!active[i]) continue;
+            for (int j = i + 1; j < N; ++j) {
+                if (!active[j]) continue;
+                float d = D[static_cast<size_t>(i) * N + j];
+                if (d < best_dist) {
+                    best_dist = d;
+                    best_i = i;
+                    best_j = j;
+                }
+            }
+        }
+ 
+        // Safety check – should never trigger for valid input
+        if (best_i < 0)
+            break;
+ 
+        // 4b. Merge cluster j into cluster i  (i is the survivor)
+        const int sz_i = cluster_size[best_i];
+        const int sz_j = cluster_size[best_j];
+        const int sz_new = sz_i + sz_j;
+ 
+        // Update the mean of cluster i (weighted average)
+        for (int ch = 0; ch < C; ++ch) {
+            means[static_cast<size_t>(best_i) * C + ch] =
+                (means[static_cast<size_t>(best_i) * C + ch] * sz_i +
+                 means[static_cast<size_t>(best_j) * C + ch] * sz_j)
+                / static_cast<double>(sz_new);
+        }
+        cluster_size[best_i] = sz_new;
+ 
+        // 4c. Update row/column best_i using average-linkage formula
+        for (int m = 0; m < N; ++m) {
+            if (!active[m] || m == best_i || m == best_j) continue;
+ 
+            float d_im = D[static_cast<size_t>(best_i) * N + m];
+            float d_jm = D[static_cast<size_t>(best_j) * N + m];
+ 
+            float d_new = (static_cast<float>(sz_i) * d_im +
+                           static_cast<float>(sz_j) * d_jm)
+                          / static_cast<float>(sz_new);
+ 
+            D[static_cast<size_t>(best_i) * N + m] = d_new;
+            D[static_cast<size_t>(m)      * N + best_i] = d_new;
+        }
+ 
+        // 4d. Deactivate cluster j; redirect its cells to cluster i
+        active[best_j] = false;
+        for (int i = 0; i < N; ++i)
+            if (cluster_id[i] == best_j)
+                cluster_id[i] = best_i;
+ 
+        --n_active;
+    }
+ 
+    // ── 5. Relabel active clusters to consecutive ids 0, 1, …, k-1 ───────────
+    std::unordered_map<int, int> label_map;
+    int next_label = 0;
+    for (int i = 0; i < N; ++i) {
+        int cid = cluster_id[i];
+        if (label_map.find(cid) == label_map.end())
+            label_map[cid] = next_label++;
+        cluster_id[i] = label_map[cid];
+    }
+ 
+    // ── 6. Project cell labels back to individual pixels ─────────────────────
+    ImageF32 label_img(std::vector<ssize_t>{H, W});
+    auto out = label_img.mutable_unchecked<2>();
+ 
+    for (int gr = 0; gr < grid_h; ++gr) {
+        for (int gc = 0; gc < grid_w; ++gc) {
+            const int cell_id    = gr * grid_w + gc;
+            const float lbl      = static_cast<float>(cluster_id[cell_id]);
+ 
+            const int r_start = gr * cell;
+            const int r_end   = std::min(r_start + cell, H);
+            const int c_start = gc * cell;
+            const int c_end   = std::min(c_start + cell, W);
+ 
+            for (int r = r_start; r < r_end; ++r)
+                for (int c = c_start; c < c_end; ++c)
+                    out(r, c) = lbl;
+        }
+    }
+ 
+    return label_img;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
